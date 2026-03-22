@@ -1,5 +1,7 @@
 # Zombie Apocalypse
 
+![Zombie Apocalypse](github.png)
+
 > A multiplayer browser-based zombie survival deathmatch where the real question isn't "will you survive the horde?" — it's "will you survive your coworkers?"
 
 Built with Three.js and WebSockets. No build step. No webpack. No 847 npm dependencies. Just zombies, bullets, and betrayal.

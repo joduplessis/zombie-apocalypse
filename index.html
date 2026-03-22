@@ -150,12 +150,261 @@ const bullets = []; // { mesh, dir, life, ownerId }
 const zombies = [];
 const buildings = [];
 const bloodSplats = [];
-const MAP_SIZE = 120;
+const MAP_SIZE = 250;
 const ZOMBIE_BASE_SPEED = 3.5;
 const mouse = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 let mouseWorldPos = new THREE.Vector3();
+
+// ── AUDIO ──
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function sfxShoot() {
+  const ctx = ensureAudio(); const t = ctx.currentTime;
+  // Noise burst for gunshot
+  const buf = ctx.createBuffer(1, ctx.sampleRate * 0.08, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 3);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  // Bandpass for punch
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 800; bp.Q.value = 1.5;
+  const gain = ctx.createGain(); gain.gain.setValueAtTime(0.35, t); gain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+  src.connect(bp); bp.connect(gain); gain.connect(ctx.destination);
+  src.start(t); src.stop(t + 0.08);
+  // Low thump
+  const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.setValueAtTime(150, t); osc.frequency.exponentialRampToValueAtTime(40, t + 0.06);
+  const g2 = ctx.createGain(); g2.gain.setValueAtTime(0.3, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+  osc.connect(g2); g2.connect(ctx.destination); osc.start(t); osc.stop(t + 0.06);
+}
+
+function sfxZombieSpawn() {
+  const ctx = ensureAudio(); const t = ctx.currentTime;
+  // Low creepy groan
+  const osc = ctx.createOscillator(); osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(80 + Math.random() * 30, t);
+  osc.frequency.linearRampToValueAtTime(60 + Math.random() * 20, t + 0.4);
+  // Wobble for eerie effect
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 5 + Math.random() * 3;
+  const lfoGain = ctx.createGain(); lfoGain.gain.value = 15;
+  lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
+  const gain = ctx.createGain(); gain.gain.setValueAtTime(0.08, t);
+  gain.gain.linearRampToValueAtTime(0.12, t + 0.1);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 400;
+  osc.connect(lp); lp.connect(gain); gain.connect(ctx.destination);
+  lfo.start(t); osc.start(t); osc.stop(t + 0.5); lfo.stop(t + 0.5);
+}
+
+function sfxZombieDeath() {
+  const ctx = ensureAudio(); const t = ctx.currentTime;
+  // Squelchy splat
+  const buf = ctx.createBuffer(1, ctx.sampleRate * 0.15, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 2);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 600;
+  const gain = ctx.createGain(); gain.gain.setValueAtTime(0.2, t); gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+  src.connect(lp); lp.connect(gain); gain.connect(ctx.destination);
+  src.start(t); src.stop(t + 0.15);
+  // Descending tone
+  const osc = ctx.createOscillator(); osc.type = 'sine';
+  osc.frequency.setValueAtTime(300, t); osc.frequency.exponentialRampToValueAtTime(50, t + 0.2);
+  const g2 = ctx.createGain(); g2.gain.setValueAtTime(0.15, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+  osc.connect(g2); g2.connect(ctx.destination); osc.start(t); osc.stop(t + 0.2);
+}
+
+function sfxPlayerHit() {
+  const ctx = ensureAudio(); const t = ctx.currentTime;
+  // Dull impact thud
+  const osc = ctx.createOscillator(); osc.type = 'sine';
+  osc.frequency.setValueAtTime(200, t); osc.frequency.exponentialRampToValueAtTime(60, t + 0.1);
+  const gain = ctx.createGain(); gain.gain.setValueAtTime(0.3, t); gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+  osc.connect(gain); gain.connect(ctx.destination); osc.start(t); osc.stop(t + 0.15);
+  // Crunch noise
+  const buf = ctx.createBuffer(1, ctx.sampleRate * 0.05, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 4);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const g2 = ctx.createGain(); g2.gain.setValueAtTime(0.15, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+  src.connect(g2); g2.connect(ctx.destination); src.start(t); src.stop(t + 0.05);
+}
+
+function sfxWave() {
+  const ctx = ensureAudio(); const t = ctx.currentTime;
+  // Ominous rising horn
+  const osc = ctx.createOscillator(); osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(80, t); osc.frequency.linearRampToValueAtTime(120, t + 0.8);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 300;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.001, t); gain.gain.linearRampToValueAtTime(0.15, t + 0.3);
+  gain.gain.linearRampToValueAtTime(0.15, t + 0.6); gain.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+  osc.connect(lp); lp.connect(gain); gain.connect(ctx.destination);
+  osc.start(t); osc.stop(t + 1.2);
+  // Second voice for depth
+  const osc2 = ctx.createOscillator(); osc2.type = 'sine';
+  osc2.frequency.setValueAtTime(120, t); osc2.frequency.linearRampToValueAtTime(180, t + 0.8);
+  const g2 = ctx.createGain();
+  g2.gain.setValueAtTime(0.001, t); g2.gain.linearRampToValueAtTime(0.08, t + 0.4);
+  g2.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+  osc2.connect(g2); g2.connect(ctx.destination); osc2.start(t); osc2.stop(t + 1.2);
+}
+
+function sfxReload() {
+  const ctx = ensureAudio(); const t = ctx.currentTime;
+  // Click-clack
+  for (let i = 0; i < 2; i++) {
+    const delay = i * 0.15;
+    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.03, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let j = 0; j < data.length; j++) data[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / data.length, 6);
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2000 + i * 1500; bp.Q.value = 2;
+    const gain = ctx.createGain(); gain.gain.setValueAtTime(0.2, t + delay); gain.gain.exponentialRampToValueAtTime(0.001, t + delay + 0.03);
+    src.connect(bp); bp.connect(gain); gain.connect(ctx.destination);
+    src.start(t + delay); src.stop(t + delay + 0.03);
+  }
+}
+
+function sfxZombieMoan() {
+  const ctx = ensureAudio(); const t = ctx.currentTime;
+  const dur = 0.6 + Math.random() * 0.8;
+  const baseFreq = 70 + Math.random() * 40;
+
+  // Vocal formant — shaped noise + oscillator
+  const osc = ctx.createOscillator(); osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(baseFreq, t);
+  osc.frequency.linearRampToValueAtTime(baseFreq * (0.8 + Math.random() * 0.3), t + dur * 0.3);
+  osc.frequency.linearRampToValueAtTime(baseFreq * (0.6 + Math.random() * 0.2), t + dur);
+
+  // Slow wobble for that undead warble
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 3 + Math.random() * 4;
+  const lfoG = ctx.createGain(); lfoG.gain.value = 8 + Math.random() * 10;
+  lfo.connect(lfoG); lfoG.connect(osc.frequency);
+
+  // Formant filter — vowel-ish resonance
+  const formant = ctx.createBiquadFilter(); formant.type = 'bandpass';
+  formant.frequency.setValueAtTime(300 + Math.random() * 200, t);
+  formant.frequency.linearRampToValueAtTime(200 + Math.random() * 150, t + dur);
+  formant.Q.value = 3 + Math.random() * 4;
+
+  // Second formant for thickness
+  const formant2 = ctx.createBiquadFilter(); formant2.type = 'bandpass';
+  formant2.frequency.value = 600 + Math.random() * 400;
+  formant2.Q.value = 2;
+
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.001, t);
+  gain.gain.linearRampToValueAtTime(0.14 + Math.random() * 0.06, t + dur * 0.15);
+  gain.gain.linearRampToValueAtTime(0.12 + Math.random() * 0.05, t + dur * 0.7);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+
+  // Breathy noise layer
+  const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+  const nd = noiseBuf.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = (Math.random() * 2 - 1);
+  const noiseSrc = ctx.createBufferSource(); noiseSrc.buffer = noiseBuf;
+  const noiseLp = ctx.createBiquadFilter(); noiseLp.type = 'bandpass';
+  noiseLp.frequency.value = 250 + Math.random() * 200; noiseLp.Q.value = 1;
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.setValueAtTime(0.001, t);
+  noiseGain.gain.linearRampToValueAtTime(0.05, t + dur * 0.2);
+  noiseGain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+
+  osc.connect(formant); formant.connect(formant2); formant2.connect(gain); gain.connect(ctx.destination);
+  noiseSrc.connect(noiseLp); noiseLp.connect(noiseGain); noiseGain.connect(ctx.destination);
+  lfo.start(t); osc.start(t); noiseSrc.start(t);
+  osc.stop(t + dur); lfo.stop(t + dur); noiseSrc.stop(t + dur);
+}
+
+let zombieMoanTimer = 0;
+
+// ── BACKGROUND MUSIC ──
+let musicStarted = false;
+function startMusic() {
+  if (musicStarted) return;
+  musicStarted = true;
+  const ctx = ensureAudio();
+
+  // Dark ambient drone loop using oscillators
+  function playDrone() {
+    const t = ctx.currentTime;
+    const dur = 8; // loop length
+
+    // Deep bass drone
+    const bass = ctx.createOscillator(); bass.type = 'sine';
+    bass.frequency.setValueAtTime(40, t);
+    bass.frequency.linearRampToValueAtTime(45, t + dur * 0.5);
+    bass.frequency.linearRampToValueAtTime(40, t + dur);
+    const bassGain = ctx.createGain();
+    bassGain.gain.setValueAtTime(0.06, t);
+    bassGain.gain.linearRampToValueAtTime(0.08, t + dur * 0.3);
+    bassGain.gain.linearRampToValueAtTime(0.06, t + dur);
+    bass.connect(bassGain); bassGain.connect(ctx.destination);
+    bass.start(t); bass.stop(t + dur);
+
+    // Eerie pad (detuned saw pair)
+    const notes = [55, 58.27, 51.91, 55]; // Am-ish
+    const noteIdx = Math.floor(Math.random() * notes.length);
+    const freq = notes[noteIdx];
+
+    const pad1 = ctx.createOscillator(); pad1.type = 'sawtooth'; pad1.frequency.value = freq;
+    const pad2 = ctx.createOscillator(); pad2.type = 'sawtooth'; pad2.frequency.value = freq * 1.005; // slight detune
+    const padLp = ctx.createBiquadFilter(); padLp.type = 'lowpass';
+    padLp.frequency.setValueAtTime(200, t);
+    padLp.frequency.linearRampToValueAtTime(400, t + dur * 0.4);
+    padLp.frequency.linearRampToValueAtTime(150, t + dur);
+    const padGain = ctx.createGain();
+    padGain.gain.setValueAtTime(0.001, t);
+    padGain.gain.linearRampToValueAtTime(0.035, t + dur * 0.3);
+    padGain.gain.linearRampToValueAtTime(0.001, t + dur);
+    pad1.connect(padLp); pad2.connect(padLp); padLp.connect(padGain); padGain.connect(ctx.destination);
+    pad1.start(t); pad2.start(t); pad1.stop(t + dur); pad2.stop(t + dur);
+
+    // Occasional high eerie whistle
+    if (Math.random() > 0.5) {
+      const delay = Math.random() * 3;
+      const whist = ctx.createOscillator(); whist.type = 'sine';
+      whist.frequency.setValueAtTime(800 + Math.random() * 400, t + delay);
+      whist.frequency.linearRampToValueAtTime(600 + Math.random() * 300, t + delay + 2);
+      const wLp = ctx.createBiquadFilter(); wLp.type = 'lowpass'; wLp.frequency.value = 1200;
+      const wGain = ctx.createGain();
+      wGain.gain.setValueAtTime(0.001, t + delay);
+      wGain.gain.linearRampToValueAtTime(0.015, t + delay + 0.5);
+      wGain.gain.linearRampToValueAtTime(0.001, t + delay + 2);
+      whist.connect(wLp); wLp.connect(wGain); wGain.connect(ctx.destination);
+      whist.start(t + delay); whist.stop(t + delay + 2);
+    }
+
+    // Heartbeat-ish pulse (very subtle)
+    for (let p = 0; p < 4; p++) {
+      const pt = t + p * 2;
+      const beat = ctx.createOscillator(); beat.type = 'sine';
+      beat.frequency.setValueAtTime(50, pt); beat.frequency.exponentialRampToValueAtTime(30, pt + 0.15);
+      const bg = ctx.createGain();
+      bg.gain.setValueAtTime(0.08, pt); bg.gain.exponentialRampToValueAtTime(0.001, pt + 0.2);
+      beat.connect(bg); bg.connect(ctx.destination);
+      beat.start(pt); beat.stop(pt + 0.2);
+      // Double-beat
+      const beat2 = ctx.createOscillator(); beat2.type = 'sine';
+      beat2.frequency.setValueAtTime(45, pt + 0.25); beat2.frequency.exponentialRampToValueAtTime(25, pt + 0.4);
+      const bg2 = ctx.createGain();
+      bg2.gain.setValueAtTime(0.05, pt + 0.25); bg2.gain.exponentialRampToValueAtTime(0.001, pt + 0.45);
+      beat2.connect(bg2); bg2.connect(ctx.destination);
+      beat2.start(pt + 0.25); beat2.stop(pt + 0.45);
+    }
+
+    // Schedule next loop
+    setTimeout(playDrone, (dur - 0.5) * 1000);
+  }
+
+  playDrone();
+}
 
 // ── MULTIPLAYER ──
 let ws = null, myId = null, isHost = false;
@@ -259,6 +508,7 @@ function handleNetMessage(msg) {
     }
 
     case 'shoot': {
+      sfxShoot();
       const dir = new THREE.Vector3(msg.dx, msg.dy, msg.dz);
       const bullet = new THREE.Mesh(new THREE.SphereGeometry(0.12, 4, 4), new THREE.MeshBasicMaterial({ color: 0xffff44 }));
       bullet.position.set(msg.ox, msg.oy, msg.oz);
@@ -357,7 +607,7 @@ function createRemotePlayer(id) {
 function init() {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1a1a2e);
-  scene.fog = new THREE.Fog(0x1a1a2e, 60, 100);
+  scene.fog = new THREE.Fog(0x1a1a2e, 80, 160);
   clock = new THREE.Clock();
 
   camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
@@ -372,13 +622,13 @@ function init() {
   const moon = new THREE.DirectionalLight(0x8888cc, 0.8);
   moon.position.set(-30, 40, -20); moon.castShadow = true;
   moon.shadow.mapSize.set(2048, 2048);
-  moon.shadow.camera.left = -60; moon.shadow.camera.right = 60;
-  moon.shadow.camera.top = 60; moon.shadow.camera.bottom = -60;
+  moon.shadow.camera.left = -100; moon.shadow.camera.right = 100;
+  moon.shadow.camera.top = 100; moon.shadow.camera.bottom = -100;
   scene.add(moon);
 
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE), new THREE.MeshLambertMaterial({ color: 0x2a2a2a }));
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE), new THREE.MeshLambertMaterial({ color: 0x1a1e14 }));
   ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
-  scene.add(new THREE.GridHelper(MAP_SIZE, 60, 0x333333, 0x222222));
+  scene.add(new THREE.GridHelper(MAP_SIZE, 125, 0x333333, 0x222222));
 
   // Rain
   const rc = 4000, rg = new THREE.BufferGeometry(), rp = new Float32Array(rc * 3);
@@ -389,7 +639,14 @@ function init() {
 
   createPlayer();
   createBuildings();
+  createVegetation();
   spawnWave();
+
+  // Start music on first interaction (browser requires gesture for audio)
+  const startMusicOnce = () => { startMusic(); window.removeEventListener('click', startMusicOnce); window.removeEventListener('keydown', startMusicOnce); window.removeEventListener('touchstart', startMusicOnce); };
+  window.addEventListener('click', startMusicOnce);
+  window.addEventListener('keydown', startMusicOnce);
+  window.addEventListener('touchstart', startMusicOnce);
 
   window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
   window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
@@ -478,15 +735,35 @@ function createPlayer() {
 
 function createBuildings() {
   const defs = [
+    // ── Central town ──
     { x:-20,z:-20,w:8,h:12,d:8,color:0x664433 },{ x:20,z:-25,w:6,h:8,d:10,color:0x556655 },
     { x:-25,z:15,w:7,h:6,d:6,color:0x886644 },{ x:25,z:20,w:10,h:10,d:6,color:0x555566 },
     { x:0,z:-30,w:12,h:7,d:5,color:0x775533 },{ x:-10,z:25,w:5,h:5,d:5,color:0x667766 },
     { x:15,z:5,w:4,h:6,d:4,color:0x776655 },{ x:-15,z:-5,w:5,h:4,d:5,color:0x887755 },
     { x:30,z:-5,w:4,h:8,d:4,color:0x556677 },{ x:-30,z:-10,w:6,h:5,d:4,color:0x665544 },
     { x:8,z:-12,w:3,h:3,d:3,color:0x777777 },{ x:-8,z:10,w:3,h:3,d:3,color:0x666655 },
-    { x:35,z:30,w:5,h:6,d:5,color:0x775544 },{ x:-35,z:30,w:6,h:4,d:6,color:0x887766 },
-    { x:0,z:35,w:4,h:5,d:8,color:0x556655 },{ x:-35,z:-30,w:5,h:7,d:5,color:0x665577 },
-    { x:35,z:-30,w:4,h:4,d:4,color:0x776666 },
+    // ── North district ──
+    { x:0,z:-70,w:14,h:9,d:8,color:0x665544 },{ x:-20,z:-60,w:6,h:5,d:6,color:0x776655 },
+    { x:25,z:-65,w:8,h:7,d:5,color:0x556655 },{ x:-40,z:-55,w:5,h:4,d:5,color:0x887766 },
+    { x:45,z:-70,w:6,h:10,d:6,color:0x555566 },{ x:10,z:-85,w:4,h:3,d:4,color:0x777777 },
+    { x:-30,z:-80,w:7,h:6,d:7,color:0x664433 },
+    // ── South district ──
+    { x:0,z:60,w:10,h:8,d:6,color:0x775544 },{ x:-25,z:55,w:6,h:5,d:6,color:0x667766 },
+    { x:30,z:65,w:8,h:6,d:8,color:0x886644 },{ x:-45,z:70,w:5,h:4,d:5,color:0x665544 },
+    { x:50,z:55,w:4,h:7,d:4,color:0x556677 },{ x:15,z:80,w:6,h:5,d:6,color:0x776655 },
+    { x:-15,z:85,w:5,h:3,d:5,color:0x777777 },
+    // ── East outskirts ──
+    { x:60,z:0,w:8,h:6,d:6,color:0x664433 },{ x:70,z:-25,w:5,h:4,d:5,color:0x887755 },
+    { x:65,z:30,w:6,h:8,d:6,color:0x555566 },{ x:80,z:10,w:4,h:3,d:4,color:0x776666 },
+    { x:85,z:-15,w:7,h:5,d:5,color:0x665577 },{ x:75,z:50,w:5,h:6,d:5,color:0x775544 },
+    // ── West outskirts ──
+    { x:-60,z:5,w:7,h:7,d:7,color:0x556655 },{ x:-70,z:-20,w:5,h:4,d:5,color:0x886644 },
+    { x:-65,z:35,w:6,h:5,d:6,color:0x665544 },{ x:-80,z:-5,w:4,h:6,d:4,color:0x556677 },
+    { x:-75,z:-45,w:8,h:5,d:6,color:0x776655 },{ x:-85,z:20,w:5,h:3,d:5,color:0x777777 },
+    // ── Far corners ──
+    { x:90,z:80,w:6,h:5,d:6,color:0x664433 },{ x:-90,z:80,w:5,h:4,d:5,color:0x887766 },
+    { x:90,z:-80,w:7,h:8,d:5,color:0x555566 },{ x:-90,z:-80,w:6,h:6,d:6,color:0x665577 },
+    { x:50,z:-90,w:4,h:3,d:4,color:0x776666 },{ x:-50,z:90,w:5,h:4,d:5,color:0x667766 },
   ];
   defs.forEach(d => {
     const g = new THREE.Group();
@@ -504,7 +781,178 @@ function createBuildings() {
   });
 }
 
+function createVegetation() {
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x3a2a1a });
+  const deadLeafMat = new THREE.MeshLambertMaterial({ color: 0x2a3a1a, transparent: true, opacity: 0.85 });
+  const darkLeafMat = new THREE.MeshLambertMaterial({ color: 0x1a2a10, transparent: true, opacity: 0.8 });
+  const bushMat = new THREE.MeshLambertMaterial({ color: 0x223311 });
+  const deadBushMat = new THREE.MeshLambertMaterial({ color: 0x443322 });
+  const mushroomCapMat = new THREE.MeshLambertMaterial({ color: 0x884422, transparent: true, opacity: 0.9 });
+  const mushroomStemMat = new THREE.MeshLambertMaterial({ color: 0xccbb99 });
+  const graveMat = new THREE.MeshLambertMaterial({ color: 0x555555 });
+
+  // Seeded-ish random for consistent placement
+  function sr(seed) { let s=seed; return ()=>{ s=Math.sin(s*9301+49297)%1; return Math.abs(s); }; }
+  const rand = sr(42);
+
+  // ── Dead / creepy trees ──
+  for (let i = 0; i < 80; i++) {
+    const x = (rand() - 0.5) * (MAP_SIZE - 10);
+    const z = (rand() - 0.5) * (MAP_SIZE - 10);
+    // Skip if too close to a building
+    if (checkBuildingCollision(x, z, 3)) continue;
+
+    const tree = new THREE.Group();
+    const height = 4 + rand() * 8;
+    const trunkRadius = 0.2 + rand() * 0.25;
+
+    // Trunk — slightly tapered cylinder
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(trunkRadius * 0.6, trunkRadius, height, 5),
+      trunkMat
+    );
+    trunk.position.y = height / 2;
+    trunk.castShadow = true;
+    tree.add(trunk);
+
+    // Branches — random crooked sticks
+    const branchCount = 2 + Math.floor(rand() * 4);
+    for (let b = 0; b < branchCount; b++) {
+      const bLen = 1.5 + rand() * 3;
+      const bY = height * (0.4 + rand() * 0.5);
+      const bAngle = rand() * Math.PI * 2;
+      const bTilt = 0.3 + rand() * 0.8;
+      const branch = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, trunkRadius * 0.3, bLen, 3),
+        trunkMat
+      );
+      branch.position.set(Math.cos(bAngle) * 0.3, bY, Math.sin(bAngle) * 0.3);
+      branch.rotation.z = bTilt * (bAngle > Math.PI ? 1 : -1);
+      branch.rotation.y = bAngle;
+      branch.castShadow = true;
+      tree.add(branch);
+
+      // Some trees have sparse dead leaf clumps
+      if (rand() > 0.5) {
+        const leaf = new THREE.Mesh(
+          new THREE.SphereGeometry(0.5 + rand() * 0.8, 4, 3),
+          rand() > 0.5 ? deadLeafMat : darkLeafMat
+        );
+        leaf.position.set(
+          Math.cos(bAngle) * (bLen * 0.5),
+          bY + 0.5,
+          Math.sin(bAngle) * (bLen * 0.5)
+        );
+        leaf.scale.y = 0.6;
+        leaf.castShadow = true;
+        tree.add(leaf);
+      }
+    }
+
+    // Slight random lean
+    tree.rotation.x = (rand() - 0.5) * 0.1;
+    tree.rotation.z = (rand() - 0.5) * 0.1;
+    tree.position.set(x, 0, z);
+    scene.add(tree);
+  }
+
+  // ── Bushes (low, rounded, dark) ──
+  for (let i = 0; i < 100; i++) {
+    const x = (rand() - 0.5) * (MAP_SIZE - 6);
+    const z = (rand() - 0.5) * (MAP_SIZE - 6);
+    if (checkBuildingCollision(x, z, 1.5)) continue;
+
+    const bush = new THREE.Group();
+    const clumps = 1 + Math.floor(rand() * 3);
+    for (let c = 0; c < clumps; c++) {
+      const s = 0.4 + rand() * 0.8;
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(s, 5, 4),
+        rand() > 0.4 ? bushMat : deadBushMat
+      );
+      m.position.set((rand()-0.5)*0.8, s*0.6, (rand()-0.5)*0.8);
+      m.scale.y = 0.6 + rand() * 0.3;
+      m.castShadow = true;
+      bush.add(m);
+    }
+    bush.position.set(x, 0, z);
+    scene.add(bush);
+  }
+
+  // ── Glowing mushroom clusters ──
+  for (let i = 0; i < 30; i++) {
+    const x = (rand() - 0.5) * (MAP_SIZE - 10);
+    const z = (rand() - 0.5) * (MAP_SIZE - 10);
+    if (checkBuildingCollision(x, z, 1)) continue;
+
+    const cluster = new THREE.Group();
+    const count = 2 + Math.floor(rand() * 4);
+    for (let m = 0; m < count; m++) {
+      const h = 0.2 + rand() * 0.5;
+      const capR = 0.15 + rand() * 0.25;
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, h, 4), mushroomStemMat);
+      stem.position.set((rand()-0.5)*0.6, h/2, (rand()-0.5)*0.6);
+      cluster.add(stem);
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(capR, 5, 4), mushroomCapMat);
+      cap.scale.y = 0.4;
+      cap.position.set(stem.position.x, h + capR*0.2, stem.position.z);
+      cluster.add(cap);
+    }
+    // Faint eerie glow
+    const glow = new THREE.PointLight(0x44aa44, 0.4, 4);
+    glow.position.y = 0.3;
+    cluster.add(glow);
+    cluster.position.set(x, 0, z);
+    scene.add(cluster);
+  }
+
+  // ── Gravestones scattered around ──
+  for (let i = 0; i < 40; i++) {
+    const x = (rand() - 0.5) * (MAP_SIZE - 10);
+    const z = (rand() - 0.5) * (MAP_SIZE - 10);
+    if (checkBuildingCollision(x, z, 1)) continue;
+
+    const grave = new THREE.Group();
+    const stone = new THREE.Mesh(
+      new THREE.BoxGeometry(0.6, 0.8 + rand()*0.5, 0.15),
+      graveMat
+    );
+    stone.position.y = stone.geometry.parameters.height / 2;
+    stone.rotation.y = rand() * 0.3 - 0.15;
+    stone.castShadow = true;
+    grave.add(stone);
+    // Rounded top
+    const top = new THREE.Mesh(new THREE.SphereGeometry(0.3, 5, 4), graveMat);
+    top.scale.set(1, 0.5, 0.5);
+    top.position.y = stone.geometry.parameters.height;
+    grave.add(top);
+    // Slight tilt — old and crumbling
+    grave.rotation.z = (rand() - 0.5) * 0.2;
+    grave.rotation.x = (rand() - 0.5) * 0.1;
+    grave.position.set(x, 0, z);
+    scene.add(grave);
+  }
+
+  // ── Fallen logs ──
+  for (let i = 0; i < 20; i++) {
+    const x = (rand() - 0.5) * (MAP_SIZE - 10);
+    const z = (rand() - 0.5) * (MAP_SIZE - 10);
+    if (checkBuildingCollision(x, z, 2)) continue;
+    const len = 2 + rand() * 4;
+    const log = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.2, 0.25, len, 5),
+      trunkMat
+    );
+    log.rotation.z = Math.PI / 2;
+    log.rotation.y = rand() * Math.PI;
+    log.position.set(x, 0.2, z);
+    log.castShadow = true;
+    scene.add(log);
+  }
+}
+
 function spawnWave() {
+  sfxWave();
   const count = 5 + wave * 3;
   document.getElementById('wave-num').textContent = wave;
   const a = document.getElementById('wave-announce');
@@ -528,6 +976,7 @@ function spawnZombieMesh() {
 }
 
 function spawnZombie() {
+  setTimeout(sfxZombieSpawn, Math.random() * 800); // stagger groans
   const z = new THREE.Group();
   const b = new THREE.Mesh(new THREE.BoxGeometry(0.7,1.3,0.4), new THREE.MeshLambertMaterial({color:0x446633}));
   b.position.y=1.15; b.castShadow=true; z.add(b);
@@ -536,7 +985,7 @@ function spawnZombie() {
   const am = new THREE.MeshLambertMaterial({color:0x668844});
   const la=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.7),am); la.position.set(-0.5,1.3,-0.3); z.add(la);
   const ra=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.7),am); ra.position.set(0.5,1.3,-0.3); z.add(ra);
-  const angle=Math.random()*Math.PI*2, dist=35+Math.random()*15;
+  const angle=Math.random()*Math.PI*2, dist=50+Math.random()*40;
   z.position.set(Math.max(-MAP_SIZE/2+2,Math.min(MAP_SIZE/2-2,Math.cos(angle)*dist)),0,Math.max(-MAP_SIZE/2+2,Math.min(MAP_SIZE/2-2,Math.sin(angle)*dist)));
   scene.add(z);
   const speed=ZOMBIE_BASE_SPEED+Math.random()*1.5+wave*0.3, hp=1+Math.floor(wave/3);
@@ -545,6 +994,7 @@ function spawnZombie() {
 
 function shoot() {
   if (gameOver || dead || reloading || ammo <= 0) return;
+  sfxShoot();
   ammo--; updateAmmoDisplay();
   const dir = new THREE.Vector3().subVectors(mouseWorldPos, player.position); dir.y=0; dir.normalize();
   const origin = player.position.clone().add(new THREE.Vector3(0,1.2,0)).add(dir.clone().multiplyScalar(0.8));
@@ -559,6 +1009,7 @@ function shoot() {
 
 function reload() {
   if (reloading||ammo===maxAmmo) return;
+  sfxReload();
   reloading=true;
   document.getElementById('ammo-display').textContent='RELOADING...';
   setTimeout(()=>{ammo=maxAmmo;reloading=false;updateAmmoDisplay();},1500);
@@ -578,6 +1029,7 @@ function createBloodSplat(x,z) {
 }
 
 function damagePlayer(amount) {
+  sfxPlayerHit();
   playerHealth = Math.max(0, playerHealth - amount);
   const bar = document.getElementById('health-bar');
   bar.style.width = playerHealth + '%';
@@ -597,7 +1049,7 @@ function damagePlayer(amount) {
 function respawn() {
   // Random spawn position
   const angle = Math.random() * Math.PI * 2;
-  const dist = 10 + Math.random() * 15;
+  const dist = 15 + Math.random() * 30;
   player.position.set(Math.cos(angle)*dist, 0, Math.sin(angle)*dist);
   playerHealth = 100; dead = false; gameOver = false; ammo = maxAmmo; reloading = false;
   player.visible = true;
@@ -706,7 +1158,7 @@ function animate() {
 
   // Rain
   const rArr=rain.geometry.attributes.position.array;
-  for(let i=0;i<rArr.length;i+=3){rArr[i+1]-=25*dt;if(rArr[i+1]<0){rArr[i]=player.position.x+(Math.random()-0.5)*80;rArr[i+1]=30+Math.random()*10;rArr[i+2]=player.position.z+(Math.random()-0.5)*80;}}
+  for(let i=0;i<rArr.length;i+=3){rArr[i+1]-=25*dt;if(rArr[i+1]<0){rArr[i]=player.position.x+(Math.random()-0.5)*140;rArr[i+1]=30+Math.random()*10;rArr[i+2]=player.position.z+(Math.random()-0.5)*140;}}
   rain.geometry.attributes.position.needsUpdate=true;
 
   // Camera
@@ -730,6 +1182,7 @@ function animate() {
       if(b.mesh.position.distanceTo(z.mesh.position.clone().add(new THREE.Vector3(0,1,0)))<1.0){
         z.hp--; createBloodSplat(z.mesh.position.x,z.mesh.position.z);
         if(z.hp<=0){
+          sfxZombieDeath();
           for(let s=0;s<3;s++) createBloodSplat(z.mesh.position.x+(Math.random()-0.5)*1.5,z.mesh.position.z+(Math.random()-0.5)*1.5);
           scene.remove(z.mesh); zombies.splice(j,1);
           if(b.ownerId===myId){ zombieKills++; document.getElementById('kill-count').textContent=zombieKills; }
@@ -788,7 +1241,7 @@ function animate() {
         else z.mesh.position.z+=(Math.random()>0.5?1:-1)*z.speed*dt;
         if(!checkBuildingCollision(z.mesh.position.x,nz,0.5)) z.mesh.position.z=nz;
         else z.mesh.position.x+=(Math.random()>0.5?1:-1)*z.speed*dt;
-        z.mesh.rotation.y=Math.atan2(dir.x,dir.z);
+        z.mesh.rotation.y=Math.atan2(dir.x,dir.z)+Math.PI;
         z.mesh.position.y=Math.abs(Math.sin(clock.elapsedTime*6+z.speed))*0.1;
       }
       // Damage local player only
@@ -806,6 +1259,15 @@ function animate() {
       const d=player.position.distanceTo(z.mesh.position);
       if(d<1.5){z.attackCooldown-=dt;if(z.attackCooldown<=0){damagePlayer(8+Math.floor(wave/2));z.attackCooldown=0.8;}}
     }
+  }
+
+  // Zombie ambient moans
+  zombieMoanTimer -= dt;
+  if (zombieMoanTimer <= 0 && zombies.length > 0) {
+    // Pick a random zombie within earshot
+    const nearby = zombies.filter(z => z.mesh.position.distanceTo(player.position) < 40);
+    if (nearby.length > 0) sfxZombieMoan();
+    zombieMoanTimer = 0.8 + Math.random() * 2; // every 0.8-2.8 seconds
   }
 
   // Blood fade
